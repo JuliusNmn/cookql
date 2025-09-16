@@ -79,6 +79,8 @@ class QueryCandidate:
     generation_timestamp: datetime
     llm_model: str
     llm_temperature: float
+    validation_result: Optional[str] = None  # Result from CodeQL compilation check
+    is_valid: bool = True  # Whether the query passed compilation check
     
     def __post_init__(self):
         if isinstance(self.generation_timestamp, str):
@@ -406,6 +408,7 @@ class Experiment:
     use_three_shot_generation: bool = True
     use_fp_fn_analysis: bool = True
     llm_model: str = "unknown"
+    initial_query: Optional[str] = None
     
     # Test runs (iterations)
     test_runs: List[TestRun] = field(default_factory=list)
@@ -490,7 +493,7 @@ class ExperimentStorage:
     
     def save_experiment(self, experiment: Experiment):
         """Save experiment to disk"""
-        file_path = self.storage_dir / f"{experiment.experiment_id}.json"
+        file_path = self.storage_dir / f"{experiment.created_timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{experiment.experiment_id}.json"
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(experiment.to_dict(), f, indent=2, ensure_ascii=False)
     
@@ -520,7 +523,7 @@ class ExperimentStorage:
 
 def create_new_experiment(name: str, description: str, target_cwe: str, 
                          use_three_shot: bool = True, use_fp_fn_analysis: bool = True,
-                         llm_model: str = "unknown") -> Experiment:
+                         llm_model: str = "unknown", initial_query: Optional[str] = None) -> Experiment:
     """Factory function to create a new experiment"""
     experiment_id = str(uuid.uuid4())
     
@@ -532,7 +535,8 @@ def create_new_experiment(name: str, description: str, target_cwe: str,
         created_timestamp=datetime.now(timezone.utc),
         use_three_shot_generation=use_three_shot,
         use_fp_fn_analysis=use_fp_fn_analysis,
-        llm_model=llm_model
+        llm_model=llm_model,
+        initial_query=initial_query
     )
 
 
