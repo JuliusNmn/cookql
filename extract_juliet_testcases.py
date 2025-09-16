@@ -107,7 +107,10 @@ class JulietTestSuiteAnalyzer:
         # Walk through all Java files in the testcases directory
         for java_file in testcases_dir.rglob("*.java"):
             relative_path = str(java_file.relative_to(self.juliet_path))
+            
             testcase_name = self._extract_testcase_name(java_file.name)
+            if testcase_name in ["ServletMain", "Main"]:
+                continue
             if testcase_name:
                 testcase_files[testcase_name].append(relative_path)
         
