@@ -74,7 +74,7 @@ class FileStore:
     def write_files_to_tmp_dir(self) -> Tuple[bool, str]:
         """Write all files to a temporary directory and return the path."""
         if not self._files:
-            return "Error: No files to write."
+            return False,"Error: No files to write."
         
         # Create a temporary directory
         tmp_dir = tempfile.mkdtemp(prefix="file_store_")
