@@ -29,6 +29,15 @@ from dataclasses import dataclass
 from extract_juliet_testcases import JulietTestSuiteAnalyzer, TestCase
 import sys
 
+import dotenv
+dotenv.load_dotenv()
+
+# Retrieve CODEQL_PATH from environment
+codeql_path = os.getenv("CODEQL_PATH")
+if codeql_path is None:
+    print("Error: CODEQL_PATH environment variable is not defined.")
+    sys.exit(1)
+
 @dataclass
 class ExtractedMethod:
     """Represents an extracted method with its metadata."""
@@ -1017,7 +1026,7 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
 
 
 def create_codeql_databases(output_root: str, juliet_support_path: str, db_root: str = None, 
-                          codeql_path: str = "codeql", max_workers: int = None):
+                          codeql_path: str = None, max_workers: int = None):
     """
     For each generated project in output_root, create a CodeQL database in parallel.
     
@@ -1105,7 +1114,7 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
     print(f"   📁 Databases location: {db_root}")
 
 
-def create_codeql_databases_sequential(output_root: str, juliet_support_path: str, db_root: str = None, codeql_path: str = "codeql"):
+def create_codeql_databases_sequential(output_root: str, juliet_support_path: str, db_root: str = None, codeql_path: str = None):
     """
     Original sequential version of CodeQL database creation (kept for compatibility).
     
@@ -1113,7 +1122,7 @@ def create_codeql_databases_sequential(output_root: str, juliet_support_path: st
         output_root: Root directory containing the generated testcase projects
         juliet_support_path: Path to the juliet-support directory 
         db_root: Root directory where CodeQL databases will be created (defaults to output_root/codeql_dbs)
-        codeql_path: Path to the CodeQL executable (defaults to "codeql")
+        codeql_path: Path to the CodeQL executable (defaults to CODEQL_PATH environment variable)
     """
     output_path = Path(output_root)
     if not output_path.exists():
@@ -1224,12 +1233,6 @@ Examples:
     )
     
     parser.add_argument(
-        '--codeql-path',
-        default='codeql',
-        help='Path to the CodeQL executable (default: codeql)'
-    )
-    
-    parser.add_argument(
         '--max-workers',
         type=int,
         help='Maximum number of parallel workers for CodeQL database creation (default: auto-detect based on CPU cores, max 4)'
@@ -1302,14 +1305,14 @@ Examples:
                     output_root=args.output_path,
                     juliet_support_path=str(juliet_support_path),
                     db_root=args.codeql_db_root,
-                    codeql_path=args.codeql_path
+                    codeql_path=codeql_path
                 )
             else:
                 create_codeql_databases(
                     output_root=args.output_path,
                     juliet_support_path=str(juliet_support_path),
                     db_root=args.codeql_db_root,
-                    codeql_path=args.codeql_path,
+                    codeql_path=codeql_path,
                     max_workers=args.max_workers
                 )
         
