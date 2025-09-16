@@ -37,6 +37,34 @@ codeql_path = os.getenv("CODEQL_PATH")
 if codeql_path is None:
     print("Error: CODEQL_PATH environment variable is not defined.")
     sys.exit(1)
+if not os.path.exists(codeql_path):
+    print(f"Error: CODEQL_PATH environment variable is not defined.")
+    sys.exit(1)
+javac_path = os.getenv("JAVAC_PATH")
+if javac_path is None:
+    print("Error: JAVAC_PATH environment variable is not defined.")
+    sys.exit(1)
+if not os.path.exists(javac_path):
+    print(f"Error: JAVAC_PATH environment variable is not defined.")
+    sys.exit(1)
+
+
+# Look for servlet-api.jar in common locations
+servlet_jar_paths = [
+    Path.cwd() / "lib" / "servlet-api.jar",  # Current working directory
+    Path(__file__).parent.parent / "lib" / "servlet-api.jar",  # Project root
+    Path("/home/julius/qlcook/lib/servlet-api.jar")  # Absolute path from our setup
+]
+
+servlet_jar = None
+for jar_path in servlet_jar_paths:
+    if jar_path.exists():
+        servlet_jar = str(jar_path)
+        break
+
+if servlet_jar is None:
+    print(f"Error: servlet-api.jar not found.")
+    sys.exit(1)
 
 @dataclass
 class ExtractedMethod:
@@ -962,24 +990,9 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
             
             # Build classpath - include servlet API if needed
             classpath = "."
-            if needs_servlet_api:
-                # Look for servlet-api.jar in common locations
-                servlet_jar_paths = [
-                    Path.cwd() / "lib" / "servlet-api.jar",  # Current working directory
-                    Path(__file__).parent.parent / "lib" / "servlet-api.jar",  # Project root
-                    Path("/home/julius/qlcook/lib/servlet-api.jar")  # Absolute path from our setup
-                ]
-                
-                servlet_jar = None
-                for jar_path in servlet_jar_paths:
-                    if jar_path.exists():
-                        servlet_jar = str(jar_path)
-                        break
-                
-                if servlet_jar:
-                    classpath = f".:{servlet_jar}"
+            classpath = f".:{servlet_jar}"
             
-            javac_cmd = f"javac -cp {classpath} {' '.join(java_file_paths)}"
+            javac_cmd = f"{javac_path} -cp {classpath} {' '.join(java_file_paths)}"
             
             cmd = [
                 codeql_path, "database", "create", str(abs_db_dir),
@@ -1109,8 +1122,6 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
     print(f"\n🎯 CodeQL database creation completed in {elapsed_time:.1f}s:")
     print(f"   ✅ Success: {success_count}")
     print(f"   ❌ Failed: {failed_count}")
-    if success_count > 0:
-        print(f"   ⏱️  Average time per database: {elapsed_time/len(testcase_dirs):.1f}s")
     print(f"   📁 Databases location: {db_root}")
 
 
