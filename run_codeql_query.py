@@ -3,6 +3,7 @@
 CodeQL Query Runner for Juliet Testcases
 
 This script runs CodeQL queries on generated testcase databases, with support for:
+- Validating query syntax without execution (--validate-only)
 - Running single queries (.ql files) or multiple queries (directories containing .ql files)
 - Running queries on all databases or filtered subsets
 - Filtering by CWE, project names, or limits
@@ -12,6 +13,9 @@ This script runs CodeQL queries on generated testcase databases, with support fo
 - Multiple output formats (JSON, CSV, SARIF)
 
 Usage examples:
+  # Validate a query without running it
+  python run_codeql_query.py --query path/to/query.ql --validate-only
+  
   # Run a single query file
   python run_codeql_query.py --query path/to/query.ql --db-root ./codeql_dbs
   
@@ -66,6 +70,10 @@ class QuerySummary:
     average_execution_time: float
     query_file: str
     timestamp: str
+    false_positives: int = 0
+    false_negatives: int = 0
+    precision: float = 0.0
+    recall: float = 0.0
 
 
 class CodeQLQueryRunner:
@@ -155,7 +163,7 @@ class CodeQLQueryRunner:
         return cwe_id, variant
     
     def _run_single_query(self, project_name: str, db_path: Path, query_file: str, 
-                         output_format: str = "json") -> QueryResult:
+                         output_format: str = "sarif-latest") -> QueryResult:
         """Run a CodeQL query on a single database."""
         start_time = time.time()
         
@@ -207,11 +215,27 @@ class CodeQLQueryRunner:
                     variant=variant
                 )
             else:
+                # Print command output immediately on failure
+                print(f"❌ CodeQL failed for {project_name} (exit code {result.returncode})")
+                if result.stdout.strip():
+                    print(f"STDOUT:\n{result.stdout.strip()}")
+                if result.stderr.strip():
+                    print(f"STDERR:\n{result.stderr.strip()}")
+                print("-" * 50)
+                
                 # Clean up output file on error
                 if output_file.exists():
                     output_file.unlink()
                 
                 cwe_id, variant = self._extract_metadata(project_name)
+                
+                # Store both stdout and stderr in error message for later reference
+                error_parts = []
+                if result.stdout.strip():
+                    error_parts.append(f"STDOUT: {result.stdout.strip()}")
+                if result.stderr.strip():
+                    error_parts.append(f"STDERR: {result.stderr.strip()}")
+                error_message = "\n".join(error_parts) if error_parts else f"Exit code {result.returncode}"
                 
                 return QueryResult(
                     project_name=project_name,
@@ -220,12 +244,15 @@ class CodeQLQueryRunner:
                     execution_time=execution_time,
                     result_count=0,
                     results=[],
-                    error_message=result.stderr.strip(),
+                    error_message=error_message,
                     cwe_id=cwe_id,
                     variant=variant
                 )
                 
         except subprocess.TimeoutExpired:
+            print(f"❌ CodeQL timeout for {project_name} (5 minute limit exceeded)")
+            print("-" * 50)
+            
             execution_time = time.time() - start_time
             cwe_id, variant = self._extract_metadata(project_name)
             
@@ -241,6 +268,9 @@ class CodeQLQueryRunner:
                 variant=variant
             )
         except Exception as e:
+            print(f"❌ CodeQL exception for {project_name}: {str(e)}")
+            print("-" * 50)
+            
             execution_time = time.time() - start_time
             cwe_id, variant = self._extract_metadata(project_name)
             
@@ -303,7 +333,7 @@ class CodeQLQueryRunner:
             return [], 0
     
     def run_query(self, query_file: str, databases: List[Tuple[str, Path]], 
-                  output_format: str = "json", parallel: bool = True) -> List[QueryResult]:
+                  output_format: str = "sarif-latest", parallel: bool = True) -> List[QueryResult]:
         """Run a query or queries on multiple databases."""
         # Check if it's a query pack (contains ':'), a directory, or a file path
         query_path = Path(query_file)
@@ -345,7 +375,7 @@ class CodeQLQueryRunner:
                         
                         status = "✅" if result.success else "❌"
                         count_info = f" ({result.result_count} results)" if result.success else ""
-                        print(f"{status} {result.project_name}{count_info}")
+                        print(f"{status} {len(results)}/{len(databases)} {result.project_name}{count_info} ")
                         
                     except Exception as e:
                         print(f"❌ {name}: Exception occurred: {e}")
@@ -359,6 +389,7 @@ class CodeQLQueryRunner:
                 status = "✅" if result.success else "❌"
                 count_info = f" ({result.result_count} results)" if result.success else ""
                 print(f"{status} {result.project_name}{count_info}")
+                print(f"Processed {len(results)}/{len(databases)} databases")
         
         self.results = results
         return results
@@ -372,6 +403,12 @@ class CodeQLQueryRunner:
         total_time = sum(r.execution_time for r in self.results)
         avg_time = total_time / len(self.results) if self.results else 0
         
+        false_positives = sum(1 for r in self.results if r.variant == 'good' and r.result_count > 0)
+        false_negatives = sum(1 for r in self.results if r.variant == 'bad' and r.result_count == 0)
+        
+        precision = total_results / (total_results + false_positives) if total_results + false_positives > 0 else 0
+        recall = total_results / (total_results + false_negatives) if total_results + false_negatives > 0 else 0
+        
         return QuerySummary(
             total_databases=len(self.results),
             successful_runs=len(successful),
@@ -380,7 +417,11 @@ class CodeQLQueryRunner:
             total_execution_time=total_time,
             average_execution_time=avg_time,
             query_file=query_file,
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
+            false_positives=false_positives,
+            false_negatives=false_negatives,
+            precision=precision,
+            recall=recall
         )
     
     def save_results(self, output_file: str, format: str = "json", include_summary: bool = True):
@@ -480,6 +521,56 @@ class CodeQLQueryRunner:
                 error = result.error_message or "Unknown error"
                 print(f"  ❌ {result.project_name}: {error}")
     
+    def validate_query(self, query_file: str, timeout: int = 30) -> Tuple[bool, str]:
+        """Validate a CodeQL query using the --check-only flag.
+        
+        Returns:
+            Tuple[bool, str]: (success, message) where success is True if valid, False otherwise
+        """
+        import tempfile
+        
+        query_path = Path(query_file)
+        if not query_path.exists():
+            return False, f"Query file does not exist: {query_file}"
+        
+        
+        if not query_path.is_dir() and not query_file.endswith('.ql'):
+            return False, f"File is not a .ql query file: {query_file}"
+        
+        
+
+        try:
+            
+            # Run CodeQL query compile with --check-only flag
+            cmd = [
+                self.codeql_path, "query", "compile", 
+                "--check-only",
+                "--threads=1",  # Use single thread for validation
+                "--search-path=/opt/codeql",  # Add CodeQL library search path
+                str(query_path)
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
+            
+            if result.returncode == 0:
+                return True, "Query compiled successfully"
+            else:
+                # Extract error information
+                error_output = result.stderr.strip() or result.stdout.strip()
+                return False, f"Compilation failed with error: {error_output}"
+                
+        except subprocess.TimeoutExpired:
+            return False, f"Query validation timed out after {timeout} seconds"
+        except Exception as e:
+            return False, f"Exception during validation: {str(e)}"
+        
+
     def print_results(self, limit_per_db: int = None, show_details: bool = True):
         """Print the actual query results to console."""
         if not self.results:
@@ -557,6 +648,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Validate a query without running it
+  python run_codeql_query.py --query security.ql --validate-only
+  
   # Single query file
   python run_codeql_query.py --query security.ql --db-root ./codeql_dbs
   
@@ -669,6 +763,20 @@ Examples:
         help='Show only result counts without detailed content'
     )
     
+    # Query validation options
+    parser.add_argument(
+        '--validate-only',
+        action='store_true',
+        help='Only validate the query syntax without running it on databases'
+    )
+    
+    parser.add_argument(
+        '--validation-timeout',
+        type=int,
+        default=30,
+        help='Timeout for query validation in seconds (default: 30)'
+    )
+    
     args = parser.parse_args()
     
     try:
@@ -677,6 +785,19 @@ Examples:
             codeql_path=args.codeql_path,
             max_workers=args.max_workers
         )
+        
+        # Handle validation-only mode
+        if args.validate_only:
+            print(f"Validating query: {args.query}")
+            success, message = runner.validate_query(args.query, args.validation_timeout)
+            
+            if success:
+                print(f"VALID: {message}")
+            else:
+                print(f"INVALID: {message}")
+            
+            # Return appropriate exit code
+            return 0 if success else 1
         
         # Prepare filters
         filters = {}
