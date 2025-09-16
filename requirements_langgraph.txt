@@ -1,0 +1,14 @@
+# Core dependencies for CodeQL experiment system
+langchain-core>=0.1.0
+langchain-openai>=0.1.0
+langgraph>=0.1.0
+
+# Data analysis and visualization
+matplotlib>=3.7.0
+pandas>=2.0.0
+seaborn>=0.12.0
+
+# Existing dependencies (if not already installed)
+javalang>=0.13.0
+pathlib2>=2.3.7
+
