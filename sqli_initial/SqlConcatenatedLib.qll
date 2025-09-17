@@ -2,7 +2,7 @@
 overlay[local?]
 module;
 
-import semmle.code.java.security.ControlledString
+import ControlledString
 import semmle.code.java.dataflow.TaintTracking
 
 /**

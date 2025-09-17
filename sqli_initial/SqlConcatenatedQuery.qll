@@ -2,9 +2,9 @@
 
 import java
 private import semmle.code.java.dataflow.TaintTracking
-private import semmle.code.java.security.SqlConcatenatedLib
-private import semmle.code.java.security.SqlInjectionQuery
-private import semmle.code.java.security.Sanitizers
+private import SqlConcatenatedLib
+private import SqlInjectionQuery
+private import Sanitizers
 
 private class UncontrolledStringBuilderSource extends DataFlow::ExprNode {
   UncontrolledStringBuilderSource() {

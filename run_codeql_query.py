@@ -643,6 +643,8 @@ class CodeQLQueryRunner:
 
 
 def main():
+    import dotenv
+    dotenv.load_dotenv()
     parser = argparse.ArgumentParser(
         description="Run CodeQL queries on Juliet testcase databases",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -709,8 +711,8 @@ Examples:
     # Execution options
     parser.add_argument(
         '--codeql-path',
-        default='codeql',
-        help='Path to the CodeQL executable (default: codeql)'
+        default=os.getenv("CODEQL_PATH"),
+        help='Path to the CodeQL executable (default: CODEQL_PATH)'
     )
     
     parser.add_argument(

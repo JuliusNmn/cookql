@@ -13,9 +13,9 @@
  */
 
 import java
-import semmle.code.java.security.SqlConcatenatedLib
-import semmle.code.java.security.SqlInjectionQuery
-import semmle.code.java.security.SqlConcatenatedQuery
+import SqlConcatenatedLib
+import SqlInjectionQuery
+import SqlConcatenatedQuery
 
 from QueryInjectionSink query, Expr uncontrolled
 where

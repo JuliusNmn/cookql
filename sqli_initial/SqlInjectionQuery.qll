@@ -7,8 +7,8 @@
  */
 
 import java
-import semmle.code.java.dataflow.FlowSources
-private import semmle.code.java.security.Sanitizers
+import FlowSources
+private import Sanitizers
 import semmle.code.java.security.QueryInjection
 
 /**
