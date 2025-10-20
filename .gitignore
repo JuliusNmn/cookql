@@ -1,7 +1,5 @@
 __pycache__/
-dataset/
 .env
-dataset100/
-datasetPT/
+datasets/
 .venv/
 logs/
