@@ -22,6 +22,7 @@ import concurrent.futures
 import threading
 import multiprocessing
 import time
+import logging
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Tuple
 import javalang
@@ -1111,7 +1112,8 @@ class JulietTestcaseSplitter:
 
 
 def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_support_path: str, 
-                                 codeql_path: str, progress_lock: threading.Lock) -> Tuple[str, bool, str]:
+                                 codeql_path: str, progress_lock: threading.Lock, 
+                                 crash_on_fail: bool = False, log_dir: Path = None) -> Tuple[str, bool, str]:
     """
     Create a CodeQL database for a single testcase project.
     
@@ -1121,6 +1123,8 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
         juliet_support_path: Path to the juliet-support directory
         codeql_path: Path to the CodeQL executable
         progress_lock: Lock for thread-safe progress updates
+        crash_on_fail: If True, terminate program on compilation failure; if False, continue processing
+        log_dir: Directory to write failure logs (if None, logs to stdout only)
         
     Returns:
         Tuple of (project_name, success, error_message)
@@ -1226,13 +1230,30 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
                 return project_name, True, ""
             else:
                 error_msg = f"stdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
+                full_error_msg = f"Error creating CodeQL database for {project_name}: {error_msg}\nCommand: {' '.join(cmd)}\nWorking directory: {abs_temp_src_dir}\nJava files: {java_file_paths}\nClasspath: {classpath}\nJavac command: {javac_cmd}"
+                
+                # Log the error to file if log_dir is provided
+                if log_dir:
+                    log_file = log_dir / f"{project_name}_compilation_error.log"
+                    with open(log_file, 'w', encoding='utf-8') as f:
+                        f.write(f"Compilation Error for {project_name}\n")
+                        f.write("=" * 50 + "\n")
+                        f.write(full_error_msg)
+                        f.write("\n")
+                
+                # Print error to stdout
                 print(f"Error creating CodeQL database for {project_name}: {error_msg}")
                 print(f"Command: {' '.join(cmd)}")
                 print(f"Working directory: {abs_temp_src_dir}")
                 print(f"Java files: {java_file_paths}")
                 print(f"Classpath: {classpath}")
                 print(f"Javac command: {javac_cmd}")
-                sys.exit(1)
+                
+                # Handle crash behavior
+                if crash_on_fail:
+                    sys.exit(1)
+                else:
+                    return project_name, False, error_msg
         else:
             if temp_src_dir.exists():
                 shutil.rmtree(temp_src_dir)
@@ -1250,7 +1271,8 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
 
 
 def create_codeql_databases(output_root: str, juliet_support_path: str, db_root: str = None, 
-                          codeql_path: str = None, max_workers: int = None):
+                          codeql_path: str = None, max_workers: int = None, 
+                          crash_on_fail: bool = False, log_dir: str = None):
     """
     For each generated project in output_root, create a CodeQL database in parallel.
     
@@ -1260,6 +1282,8 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
         db_root: Root directory where CodeQL databases will be created (defaults to output_root/codeql_dbs)
         codeql_path: Path to the CodeQL executable (defaults to "codeql")
         max_workers: Maximum number of parallel workers (defaults to min(4, cpu_count))
+        crash_on_fail: If True, terminate program on compilation failure; if False, continue processing
+        log_dir: Directory to write failure logs (if None, logs to stdout only)
     """
     output_path = Path(output_root)
     if not output_path.exists():
@@ -1272,6 +1296,12 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
         db_root = Path(db_root)
     
     db_root.mkdir(exist_ok=True)
+    
+    # Create log directory if specified
+    log_dir_path = None
+    if log_dir:
+        log_dir_path = Path(log_dir)
+        log_dir_path.mkdir(parents=True, exist_ok=True)
     
     # Find all generated testcase projects
     testcase_dirs = [d for d in output_path.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name != 'codeql_dbs']
@@ -1301,7 +1331,8 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
         # Submit all tasks
         future_to_project = {
             executor.submit(create_single_codeql_database, testcase_dir, db_root, 
-                          juliet_support_path, codeql_path, progress_lock): testcase_dir.name
+                          juliet_support_path, codeql_path, progress_lock, 
+                          crash_on_fail, log_dir_path): testcase_dir.name
             for testcase_dir in testcase_dirs
         }
         
@@ -1336,7 +1367,8 @@ def create_codeql_databases(output_root: str, juliet_support_path: str, db_root:
     print(f"   📁 Databases location: {db_root}")
 
 
-def create_codeql_databases_sequential(output_root: str, juliet_support_path: str, db_root: str = None, codeql_path: str = None):
+def create_codeql_databases_sequential(output_root: str, juliet_support_path: str, db_root: str = None, 
+                                     codeql_path: str = None, crash_on_fail: bool = False, log_dir: str = None):
     """
     Original sequential version of CodeQL database creation (kept for compatibility).
     
@@ -1345,6 +1377,8 @@ def create_codeql_databases_sequential(output_root: str, juliet_support_path: st
         juliet_support_path: Path to the juliet-support directory 
         db_root: Root directory where CodeQL databases will be created (defaults to output_root/codeql_dbs)
         codeql_path: Path to the CodeQL executable (defaults to CODEQL_PATH environment variable)
+        crash_on_fail: If True, terminate program on compilation failure; if False, continue processing
+        log_dir: Directory to write failure logs (if None, logs to stdout only)
     """
     output_path = Path(output_root)
     if not output_path.exists():
@@ -1358,6 +1392,12 @@ def create_codeql_databases_sequential(output_root: str, juliet_support_path: st
     
     db_root.mkdir(exist_ok=True)
     
+    # Create log directory if specified
+    log_dir_path = None
+    if log_dir:
+        log_dir_path = Path(log_dir)
+        log_dir_path.mkdir(parents=True, exist_ok=True)
+    
     # Find all generated testcase projects
     testcase_dirs = [d for d in output_path.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name != 'codeql_dbs']
     
@@ -1369,7 +1409,8 @@ def create_codeql_databases_sequential(output_root: str, juliet_support_path: st
     
     for testcase_dir in testcase_dirs:
         project_name_result, success, error_message = create_single_codeql_database(
-            testcase_dir, db_root, juliet_support_path, codeql_path, progress_lock
+            testcase_dir, db_root, juliet_support_path, codeql_path, progress_lock,
+            crash_on_fail, log_dir_path
         )
         
         if success:
@@ -1472,6 +1513,12 @@ Examples:
         help='Use sequential database creation instead of parallel (useful for debugging)'
     )
     
+    parser.add_argument(
+        '--crash-on-fail',
+        action='store_true',
+        help='Terminate the program if a single testcase fails to compile (default: continue processing)'
+    )
+    
     args = parser.parse_args()
     
     try:
@@ -1527,13 +1574,18 @@ Examples:
                 print("   Please specify the correct path with --juliet-support-path")
                 return 1
             
+            # Create log directory for compilation errors
+            log_dir = Path(args.output_path) / "compilation_logs"
+            
             if args.sequential_db_creation:
                 print("Using sequential database creation mode")
                 create_codeql_databases_sequential(
                     output_root=args.output_path,
                     juliet_support_path=str(juliet_support_path),
                     db_root=args.codeql_db_root,
-                    codeql_path=codeql_path
+                    codeql_path=codeql_path,
+                    crash_on_fail=args.crash_on_fail,
+                    log_dir=str(log_dir)
                 )
             else:
                 create_codeql_databases(
@@ -1541,7 +1593,9 @@ Examples:
                     juliet_support_path=str(juliet_support_path),
                     db_root=args.codeql_db_root,
                     codeql_path=codeql_path,
-                    max_workers=args.max_workers
+                    max_workers=args.max_workers,
+                    crash_on_fail=args.crash_on_fail,
+                    log_dir=str(log_dir)
                 )
         
     except FileNotFoundError as e:
