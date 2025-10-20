@@ -66,6 +66,57 @@ if servlet_jar is None:
     print(f"Error: servlet-api.jar not found.")
     sys.exit(1)
 
+# Look for commons-lang.jar in common locations
+commons_lang_jar_paths = [
+    Path.cwd() / "lib" / "commons-lang-2.6.jar",  # Current working directory
+    Path(__file__).parent.parent / "lib" / "commons-lang-2.6.jar",  # Project root
+    Path("/home/julius/qlcook/lib/commons-lang-2.6.jar")  # Absolute path from our setup
+]
+
+commons_lang_jar = None
+for jar_path in commons_lang_jar_paths:
+    if jar_path.exists():
+        commons_lang_jar = str(jar_path)
+        break
+
+if commons_lang_jar is None:
+    print(f"Error: commons-lang-2.6.jar not found.")
+    sys.exit(1)
+
+# Look for commons-lang.jar in common locations
+commons_codec_jar_paths = [
+    Path.cwd() / "lib" / "commons-codec-1.19.0.jar",  # Current working directory
+    Path(__file__).parent.parent / "lib" / "commons-codec-1.19.0.jar",  # Project root
+    Path("/home/julius/qlcook/lib/commons-codec-1.19.0.jar")  # Absolute path from our setup
+]
+
+commons_codec_jar = None
+for jar_path in commons_codec_jar_paths:
+    if jar_path.exists():
+        commons_codec_jar = str(jar_path)
+        break
+
+if commons_codec_jar is None:
+    print(f"Error: commons-codec-1.19.0.jar not found.")
+    sys.exit(1)
+
+# Look for javax.mail.jar in common locations
+javax_mail_jar_paths = [
+    Path.cwd() / "lib" / "javax.mail.jar",  # Current working directory
+    Path(__file__).parent.parent / "lib" / "javax.mail.jar",  # Project root
+    Path("/home/julius/qlcook/lib/javax.mail.jar")  # Absolute path from our setup
+]
+
+javax_mail_jar = None
+for jar_path in javax_mail_jar_paths:
+    if jar_path.exists():
+        javax_mail_jar = str(jar_path)
+        break
+
+if javax_mail_jar is None:
+    print(f"Error: javax.mail.jar not found.")
+    sys.exit(1)
+
 @dataclass
 class ExtractedMethod:
     """Represents an extracted method with its metadata."""
@@ -346,21 +397,70 @@ class JavaSourceReconstructor:
         else:
             type_name = str(return_type)
         
+        # Handle array types first (before primitive types)
+        if self._is_array_type(return_type, type_name):
+            return 'null'
+        
         # Handle primitive types
         if type_name in ['boolean']:
             return 'false'
         elif type_name in ['byte', 'short', 'int', 'long']:
             return '0'
         elif type_name in ['float', 'double']:
-            return '0.0'
+            return '0.0f'
         elif type_name in ['char']:
             return "'\\0'"
-        # Handle array types
-        elif hasattr(return_type, 'element_type') or type_name.endswith('[]'):
-            return 'null'
         # Handle all other object types (String, etc.)
         else:
             return 'null'
+    
+    def _is_array_type(self, return_type, type_name: str) -> bool:
+        """Check if the given type is an array type."""
+        # Check for element_type attribute (javalang ReferenceType with dimensions)
+        if hasattr(return_type, 'element_type'):
+            return True
+        
+        # Check for array dimensions attribute (if available)
+        if hasattr(return_type, 'dimensions') and return_type.dimensions:
+            return True
+        
+        # Check for array notation in type name - be more specific
+        # Handle cases like "int[]", "String[]", "int[][]", etc.
+        if type_name.endswith('[]'):
+            return True
+        
+        # Check for multi-dimensional arrays (e.g., int[][], String[][])
+        # Only match if it's a proper array pattern
+        if '[]' in type_name and self._is_valid_array_pattern(type_name):
+            return True
+        
+        # Check for array notation with spaces (e.g., "int []", "String []")
+        if ' []' in type_name or '[] ' in type_name:
+            return True
+        
+        return False
+    
+    def _is_valid_array_pattern(self, type_name: str) -> bool:
+        """Check if the type name contains a valid array pattern."""
+        # Look for patterns like "Type[]", "Type[][]", etc.
+        # This should match: int[], String[], int[][], etc.
+        # But not: int, String, void, MyClass, etc.
+        
+        # Find the last occurrence of '[]' in the string
+        last_bracket_pos = type_name.rfind('[]')
+        if last_bracket_pos == -1:
+            return False
+        
+        # Check if everything after the last '[]' is also '[]' patterns
+        remaining = type_name[last_bracket_pos:]
+        
+        # The remaining part should only contain '[]' patterns
+        # Remove all '[]' patterns and see if anything is left
+        temp = remaining.replace('[]', '')
+        if temp.strip():  # If there's anything left, it's not a valid array pattern
+            return False
+        
+        return True
     
     def reconstruct_class(self, tree: javalang.tree.CompilationUnit, 
                          methods_to_keep: Set[str], 
@@ -515,6 +615,59 @@ class JulietTestcaseSplitter:
         self.helper_good_pattern = re.compile(r'^helperGood(G2B|B2G)?\d*$')
         self.source_sink_pattern = re.compile(r'^(bad|good[GB]2[GB]?\d*)(Source|Sink)$')
     
+    def add_explicit_java_io_imports(self, source_code: str) -> str:
+        """
+        Add explicit java.io imports when juliet.support.IO is used to avoid conflicts.
+        
+        This method replaces the wildcard java.io.* import with specific imports for
+        classes that are actually used in the code, preventing ambiguity with juliet.support.IO.
+        
+        Args:
+            source_code: The Java source code to process
+            
+        Returns:
+            The processed source code with explicit java.io imports
+        """
+        # Replace IO. with fully qualified juliet.support.IO. to avoid ambiguity with java.io.IO
+        source_code = re.sub(r'\bIO\.', 'juliet.support.IO.', source_code)
+        
+        # Remove java.io.* import if it conflicts with juliet.support.IO usage
+        if 'import java.io.*;' in source_code:
+            source_code = source_code.replace('import java.io.*;\n', '')
+            
+            # Comprehensive list of java.io classes that might be needed
+            java_io_classes = [
+                'IOException', 'FileNotFoundException', 'UnsupportedEncodingException',
+                'PrintWriter', 'PrintStream', 'OutputStreamWriter', 'InputStreamReader',
+                'BufferedReader', 'BufferedWriter', 'FileReader', 'FileWriter',
+                'FileInputStream', 'FileOutputStream', 'ByteArrayInputStream', 'ByteArrayOutputStream',
+                'ObjectInputStream', 'ObjectOutputStream', 'DataInputStream', 'DataOutputStream',
+                'File', 'FileDescriptor', 'RandomAccessFile', 'PipedInputStream', 'PipedOutputStream',
+                'SequenceInputStream', 'StringReader', 'StringWriter', 'CharArrayReader', 'CharArrayWriter',
+                'PushbackInputStream', 'PushbackReader', 'LineNumberReader', 'LineNumberInputStream',
+                'FilterInputStream', 'FilterOutputStream', 'FilterReader', 'FilterWriter',
+                'BufferedInputStream', 'BufferedOutputStream', 'InputStream', 'OutputStream',
+                'Reader', 'Writer', 'Serializable', 'Externalizable', 'ObjectInput', 'ObjectOutput',
+                'DataInput', 'DataOutput', 'Closeable', 'Flushable', 'AutoCloseable',
+                'FileFilter', 'FilenameFilter', 'FilePermission', 'FileSystem', 'FileSystemView',
+                'Console', 'ConsoleHandler', 'FileHandler', 'StreamHandler', 'Handler',
+                'ObjectStreamException', 'NotSerializableException',
+                'Part', 'MultipartConfigElement', 'AsyncContext', 'AsyncListener',
+                 'Filter', 'FilterChain', 'FilterConfig',
+               
+              
+            ]
+            
+            # Add specific java.io imports that are actually used in the code
+            for class_name in java_io_classes:
+                if class_name in source_code and f'import java.io.{class_name};' not in source_code:
+                    source_code = source_code.replace(
+                        '\npublic class ', 
+                        f'import java.io.{class_name};\n\npublic class '
+                    )
+        
+        return source_code
+    
     def analyze_testcases(self):
         """Analyze the Juliet test suite structure."""
         print("Analyzing Juliet test suite structure...")
@@ -609,31 +762,24 @@ class JulietTestcaseSplitter:
         
         # If this is a helper file (like 22b) and has no methods to keep, 
         # skip it for this variant
-        if not methods_to_keep and primary_file and file_path != primary_file:
-            return True  # Skip but don't fail
+        #if not methods_to_keep and primary_file and file_path != primary_file:
+        #    return True  # Skip but don't fail
         
         # Generate the new Java source (no class suffix - keep original class names)
         class_suffix = ""
         reconstructor = JavaSourceReconstructor(source_code)
         new_source = reconstructor.reconstruct_class(tree, methods_to_keep, methods_to_empty, class_suffix)
         
+        # Add explicit java.io imports to avoid conflicts with juliet.support.IO
+        new_source = self.add_explicit_java_io_imports(new_source)
+        
         # Create the output file with original name
         file_name = Path(file_path).name
         new_file_name = file_name  # Keep original filename
         
-        # Determine package structure and create file
-        package_match = re.search(r'package\s+([\w.]+);', new_source)
-        package_name = package_match.group(1) if package_match else "juliet.testcases"
+        # Get the destination path for the Java file
+        output_file_path = self.get_java_destination_path(new_source, output_dir, new_file_name)
         
-        package_dirs = package_name.split('.')
-        src_dir = output_dir / "src" / "main" / "java"
-        package_dir = src_dir
-        for dir_name in package_dirs:
-            package_dir = package_dir / dir_name
-        
-        package_dir.mkdir(parents=True, exist_ok=True)
-        
-        output_file_path = package_dir / new_file_name
         with open(output_file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
         
@@ -738,6 +884,8 @@ class JulietTestcaseSplitter:
                 impl_files.append(file_path)
             elif variant == 'good' and (filename.endswith('_goodG2B.java') or filename.endswith('_goodB2G.java')):
                 impl_files.append(file_path)
+            elif filename.endswith('_Helper.java'):
+                impl_files.append(file_path)
         
         if not base_file or not main_file:
             print(f"Missing base or main file for abstract method testcase {testcase.name}: base={base_file}, main={main_file}")
@@ -757,9 +905,6 @@ class JulietTestcaseSplitter:
                 return False
             
             # For base and impl files, copy them as-is (they don't have good/bad methods to filter)
-            src_dir = output_dir / "src" / "main" / "java"
-            src_dir.mkdir(parents=True, exist_ok=True)
-            
             for file_path in [base_file] + impl_files:
                 full_path = self.juliet_path / file_path
                 with open(full_path, 'r', encoding='utf-8') as f:
@@ -768,9 +913,12 @@ class JulietTestcaseSplitter:
                 # Keep original class names and references
                 new_source = source_code
                 
-                # Write the processed file with original name
+                # Add explicit java.io imports to avoid conflicts with juliet.support.IO
+                new_source = self.add_explicit_java_io_imports(new_source)
+        
+                # Get the destination path for the Java file using package structure
                 output_file_name = Path(file_path).name
-                output_file_path = src_dir / output_file_name
+                output_file_path = self.get_java_destination_path(new_source, output_dir, output_file_name)
                 
                 with open(output_file_path, 'w', encoding='utf-8') as f:
                     f.write(new_source)
@@ -781,11 +929,19 @@ class JulietTestcaseSplitter:
             print(f"Error processing abstract method testcase: {e}")
             return False
     
-    def create_java_project_structure(self, output_dir: Path, testcase: TestCase, 
-                                    source_code: str, class_suffix: str):
-        """Create a standalone Java project structure."""
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def get_java_destination_path(self, source_code: str, output_dir: Path, 
+                                 file_name: str = None) -> Path:
+        """
+        Get the destination file path for a Java class based on its package structure.
         
+        Args:
+            source_code: The Java source code to extract package information from
+            output_dir: The output directory for the project
+            file_name: Optional custom file name (if None, extracts from class declaration)
+            
+        Returns:
+            Path: The full destination path for the Java file
+        """
         # Extract package from source code
         package_match = re.search(r'package\s+([\w.]+);', source_code)
         package_name = package_match.group(1) if package_match else "juliet.testcases"
@@ -799,17 +955,52 @@ class JulietTestcaseSplitter:
         
         package_dir.mkdir(parents=True, exist_ok=True)
         
-        # Write the main Java file
-        class_name = re.search(r'class\s+(\w+)', source_code)
-        if class_name:
-            java_file_name = f"{class_name.group(1)}.java"
+        # Determine file name
+        if file_name is None:
+            class_name = re.search(r'public\s+class\s+(\w+)', source_code)
+            if class_name:
+                java_file_name = f"{class_name.group(1)}.java"
+            else:
+                # Fallback: try to find any class declaration
+                class_name = re.search(r'class\s+(\w+)', source_code)
+                if class_name:
+                    java_file_name = f"{class_name.group(1)}.java"
+                else:
+                    java_file_name = "UnknownClass.java"
         else:
-            java_file_name = f"{testcase.name}.java"
+            java_file_name = file_name
         
-        java_file_path = package_dir / java_file_name
+        return package_dir / java_file_name
+
+    def create_java_project_structure(self, output_dir: Path, testcase: TestCase, 
+                                    source_code: str, class_suffix: str):
+        """Create a standalone Java project structure."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Add explicit java.io imports to avoid conflicts with juliet.support.IO
+        source_code = self.add_explicit_java_io_imports(source_code)
+        
+        # Get the destination path for the main Java file
+        java_file_path = self.get_java_destination_path(source_code, output_dir)
+        
+        # Write the main Java file
         with open(java_file_path, 'w', encoding='utf-8') as f:
             f.write(source_code)
         
+        # add helper files to the project
+        for file_path in testcase.files:
+            if file_path.endswith('_Helper.java'):
+                full_path = self.juliet_path / file_path
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    helper_source_code = f.read()
+                new_source = self.add_explicit_java_io_imports(helper_source_code)
+                
+                # Get the destination path for the helper file
+                helper_file_name = Path(file_path).name
+                helper_dest_path = self.get_java_destination_path(helper_source_code, output_dir, helper_file_name)
+                
+                with open(helper_dest_path, 'w', encoding='utf-8') as f:
+                    f.write(new_source)
     def split_testcase(self, testcase: TestCase) -> Tuple[bool, bool]:
         """Split a testcase into good and bad variants."""
         print(f"Processing {testcase.name} ({testcase.testcase_type})...")
@@ -820,7 +1011,12 @@ class JulietTestcaseSplitter:
         return bad_success, good_success
     
     def split_all_testcases(self, limit: Optional[int] = None, randomize: bool = False):
-        """Split all testcases into good and bad variants."""
+        """Split all testcases into good and bad variants.
+        
+        Args:
+            limit: Maximum number of testcases to process PER CWE (not global)
+            randomize: Whether to randomize testcase order within each CWE before applying limit
+        """
         if not self.cwe_groups:
             self.analyze_testcases()
         
@@ -836,10 +1032,15 @@ class JulietTestcaseSplitter:
                 random.shuffle(testcases)
                 print(f"Randomized order of {len(testcases)} testcases")
             
+            # Apply limit per CWE
+            cwe_processed = 0
+            cwe_success = 0
+            
             for testcase in testcases:
-                if limit and total_processed >= limit:
-                    print(f"Reached limit of {limit} testcases")
-                    return
+                # Check limit per CWE instead of globally
+                if limit and cwe_processed >= limit:
+                    print(f"Reached limit of {limit} testcases for {cwe_id}")
+                    break
                 
                 # Skip bad-only testcases for now
                 if testcase.is_bad_only:
@@ -850,14 +1051,24 @@ class JulietTestcaseSplitter:
                 
                 if bad_success or good_success:
                     total_success += 1
+                    cwe_success += 1
                 
                 total_processed += 1
+                cwe_processed += 1
                 
                 if total_processed % 10 == 0:
-                    print(f"Processed {total_processed} testcases, {total_success} successful")
+                    print(f"Processed {total_processed} testcases total, {total_success} successful")
+            
+            print(f"Completed {cwe_id}: {cwe_processed} testcases processed, {cwe_success} successful")
         
-        print(f"\nCompleted processing {total_processed} testcases")
-        print(f"Successfully extracted {total_success} testcases")
+        print(f"\n{'='*60}")
+        print(f"OVERALL SUMMARY:")
+        print(f"  Total testcases processed: {total_processed}")
+        print(f"  Total successful: {total_success}")
+        print(f"  CWEs processed: {len(self.cwe_groups)}")
+        if limit:
+            print(f"  Limit per CWE: {limit}")
+        print(f"{'='*60}")
     
     def find_testcase_by_name(self, testcase_name: str) -> Optional[TestCase]:
         """Find a specific testcase by name across all CWE groups."""
@@ -988,9 +1199,9 @@ def create_single_codeql_database(testcase_dir: Path, db_root: Path, juliet_supp
                 except Exception:
                     continue
             
-            # Build classpath - include servlet API if needed
+            # Build classpath - include servlet API, commons-lang, and JavaMail
             classpath = "."
-            classpath = f".:{servlet_jar}"
+            classpath = f".:{servlet_jar}:{commons_lang_jar}:{javax_mail_jar}:{commons_codec_jar}"
             
             javac_cmd = f"{javac_path} -cp {classpath} {' '.join(java_file_paths)}"
             
@@ -1180,8 +1391,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with parallel CodeQL database creation
-  python split_juliet_testcases.py ../juliet-java-test-suite ./dataset --limit 50 --randomize --cwe CWE89 --create-codeql-dbs --codeql-path /opt/codeql/codeql
+  # Process 200 testcases per CWE for all CWEs with randomization
+  python split_juliet_testcases.py ../juliet-java-test-suite ./dataset --limit 200 --randomize
+  
+  # Process 50 testcases from a specific CWE
+  python split_juliet_testcases.py ../juliet-java-test-suite ./dataset --limit 50 --randomize --cwe CWE89
+  
+  # Process all CWEs with 200 testcases per CWE and create CodeQL databases
+  python split_juliet_testcases.py ../juliet-java-test-suite ./dataset --limit 200 --randomize --create-codeql-dbs
   
   # Single testcase extraction
   python split_juliet_testcases.py ../juliet-java-test-suite ./dataset --testcase CWE89_SQL_Injection__Property_executeBatch_61b
@@ -1207,7 +1424,7 @@ Examples:
     parser.add_argument(
         '--limit',
         type=int,
-        help='Limit the number of testcases to process (for testing)'
+        help='Limit the number of testcases to process PER CWE (not global)'
     )
     
     parser.add_argument(

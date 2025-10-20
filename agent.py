@@ -2,10 +2,11 @@
 # pip install langchain langchain-openai langchain-community
 from langchain_openai import ChatOpenAI
 from langchain_community.tools import WriteFileTool, ReadFileTool, ListDirectoryTool
-from langchain.agents import initialize_agent, AgentType
 from memory_file_tools import FileStore, WriteFileTool, ReadFileTool, ListDirectoryTool
 # pip install langgraph langchain-openai
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage
 from run_codeql_query import CodeQLQueryRunner
 import os
 import json
@@ -14,12 +15,17 @@ from datetime import datetime
 import dotenv
 dotenv.load_dotenv()
 from prompting import validation_error_repair_prompt, describe_failures, build_refinement_prompt
-from langchain.schema.runnable import RunnableConfig
+from langchain_core.runnables import RunnableConfig
 
 
 class CookQLAgent:
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-5", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
+        self.llm = ChatOpenAI(
+            model="anthropic/claude-3.5-sonnet",
+            temperature=0.8,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url="https://openrouter.ai/api/v1"
+        )
         self.file_store = FileStore()
         self.write_file_tool = WriteFileTool(self.file_store)
         self.read_file_tool = ReadFileTool(self.file_store)
@@ -27,13 +33,16 @@ class CookQLAgent:
 
         self.tools = [self.write_file_tool, self.read_file_tool, self.list_directory_tool]
 
-        self.agent = initialize_agent(self.tools, self.llm, agent=AgentType.OPENAI_FUNCTIONS, verbose=True)
+        self.agent = create_react_agent(self.llm, self.tools)
         self.query_runner = CodeQLQueryRunner(codeql_path=os.getenv("CODEQL_PATH"), max_workers=32)
+
+        # Enable console streaming of LLM outputs (set COOKQL_STREAM=0 to disable)
+        self.stream_llm = str(os.getenv("COOKQL_STREAM", "1")).lower() not in ("0", "false", "no")
 
         # Prepare filters
         self.filters = {}
-        self.filters['cwe'] = "CWE89"
-        self.filters['limit'] = 12
+        self.filters['cwe'] = "CWE36" # "CWE89"
+        self.filters['limit'] = 20
         # Find databases
         self.databases = self.query_runner.find_databases(os.getenv("DATASET_PATH"), self.filters)
 
@@ -175,25 +184,36 @@ class CookQLAgent:
         analysis = state.get("results_analysis")
         current_files = state.get("evaluated_queries")
         prompt = build_refinement_prompt(analysis, current_files)
+        print(prompt)
 
         # Ensure in-memory store reflects current state before invoking the agent
         self.file_store.set_all_files(current_files)
 
-        # Invoke the LLM agent to refine the queries
+        # Invoke the LLM agent to refine the queries (with optional streaming)
         agent_result = None
         try:
-            agent_result = self.agent.invoke({"input": prompt})
+            print("INVOKING AGENT")
+            if self.stream_llm:
+                agent_result = self._invoke_agent_with_console_stream(prompt)
+            else:
+                agent_result = self.agent.invoke({"messages": [HumanMessage(content=prompt)]})
         except Exception as e:
             agent_result = f"Agent invocation failed (refine): {e}"
             print(agent_result)
-
+        print("AGENT INVOKED")
         # Sync modified files back into state
         updated_files = self.file_store.get_all_files()
         state["refined_query"] = updated_files
         state["queries_to_validate"] = updated_files
         state["validation_count"] = 0
-        if "output" in agent_result:
-            agent_result = agent_result["output"]
+        # Extract assistant text for logging when available
+        try:
+            msgs = agent_result.get("messages", []) if isinstance(agent_result, dict) else []
+            if msgs:
+                last_msg = msgs[-1]
+                agent_result = getattr(last_msg, "content", str(last_msg))
+        except Exception:
+            pass
         # Log outputs and LLM I/O
         self._log_event(state, "refined_evaluated_query", updated_files, {"llm_input": prompt, "llm_output": agent_result})
         return state
@@ -207,10 +227,13 @@ class CookQLAgent:
         # Ensure in-memory store reflects current state before invoking the agent
         self.file_store.set_all_files(current_files)
 
-        # Invoke the LLM agent with the constructed prompt to modify files via tools
+        # Invoke the LLM agent with the constructed prompt to modify files via tools (with optional streaming)
         agent_result = None
         try:
-            agent_result = self.agent.invoke({"input": prompt})
+            if self.stream_llm:
+                agent_result = self._invoke_agent_with_console_stream(prompt)
+            else:
+                agent_result = self.agent.invoke({"messages": [HumanMessage(content=prompt)]})
         except Exception as e:
             agent_result = f"Agent invocation failed: {e}"
             print(agent_result)
@@ -218,10 +241,48 @@ class CookQLAgent:
         # Sync modified files back into state
         updated_files = self.file_store.get_all_files()
         state["queries_to_validate"] = updated_files
-        if "output" in agent_result:
-            agent_result = agent_result["output"]
+        # Extract assistant text for logging when available
+        try:
+            msgs = agent_result.get("messages", []) if isinstance(agent_result, dict) else []
+            if msgs:
+                last_msg = msgs[-1]
+                agent_result = getattr(last_msg, "content", str(last_msg))
+        except Exception:
+            pass
         self._log_event(state, "fixed_validation_errors", updated_files, {"llm_input": prompt, "llm_output": agent_result})
         return state
+
+    def _invoke_agent_with_console_stream(self, prompt):
+        """Invoke the agent and stream AI messages to console as they are produced.
+
+        Returns a dict matching the agent's usual return shape: {"messages": [...]}
+        """
+        final_messages = []
+        try:
+            for step in self.agent.stream({"messages": [HumanMessage(content=prompt)]}, stream_mode="messages"):
+                # Two possible shapes depending on library version:
+                # 1) step is a dict with {"messages": [BaseMessage, ...]}
+                # 2) step is a single BaseMessage (message-level streaming)
+                if isinstance(step, dict):
+                    msgs = step.get("messages", [])
+                    if not isinstance(msgs, list):
+                        msgs = [msgs]
+                else:
+                    msgs = [step]
+                for msg in msgs:
+                    try:
+                        final_messages.append(msg)
+                        role = getattr(msg, "type", None) or getattr(msg, "role", None)
+                        if role == "ai":
+                            text = getattr(msg, "content", "")
+                            if text:
+                                print(text, flush=True)
+                    except Exception:
+                        pass
+            return {"messages": final_messages}
+        except Exception as e:
+            print(f"Agent streaming failed: {e}")
+            return {"messages": []}
 
     def process_results(self, state):
         print("Processing results")
@@ -276,7 +337,8 @@ class CookQLAgent:
     def run(self):
         # Ensure log directory for this run's date exists
         self._ensure_log_base_dir()
-        self.file_store.load_files_from_dir("/home/julius/cookql/sqli_initial")
+        #self.file_store.load_files_from_dir("/home/julius/cookql/sqli_initial")
+        self.file_store.load_files_from_dir("/home/julius/cookql/cwe36_initial")
         initial_files = self.file_store.get_all_files()
 
         initial_state = {"run_count": 0, "validation_count": 0, "queries_to_validate": initial_files}

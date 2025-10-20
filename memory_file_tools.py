@@ -127,6 +127,7 @@ class WriteFileTool(BaseTool):
         append: bool = False,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
+        print("Writing file " + file_path)
         return self.file_store.write_file(file_path, text, append)
 
 
@@ -147,6 +148,7 @@ class ReadFileTool(BaseTool):
         file_path: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
+        print("Reading file " + file_path)
         return self.file_store.read_file(file_path)
 
 
@@ -162,6 +164,7 @@ class ListDirectoryTool(BaseTool):
         self,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
+        print("Listing directory")
         return self.file_store.list_files()
 
 

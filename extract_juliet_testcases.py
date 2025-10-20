@@ -112,7 +112,27 @@ class JulietTestSuiteAnalyzer:
             if testcase_name in ["ServletMain", "Main"]:
                 continue
             if testcase_name:
+                parent = Path(java_file).parent
+                relative_parent = str(parent.relative_to(self.juliet_path))
+                # if os.path.exists( parent / "Main.java") and "Main.java" not in testcase_files[testcase_name]:
+                #     testcase_files[testcase_name].append(relative_parent + "/Main.java")
+                # if os.path.exists( parent / "ServletMain.java") and "ServletMain.java" not in testcase_files[testcase_name]:
+                #     testcase_files[testcase_name].append(relative_parent + "/ServletMain.java")
+                # if os.path.exists( parent / "ThreadMain.java") and "ThreadMain.java" not in testcase_files[testcase_name]:
+                #     testcase_files[testcase_name].append(relative_parent + "/ThreadMain.java")
+                for java_file in parent.rglob("*_Helper.java"):
+                    relative_path = str(java_file.relative_to(self.juliet_path))
+                    testcase_files[testcase_name].append(relative_path)
+                if os.path.exists( parent / "HelperClass") and "HelperClass" not in testcase_files[testcase_name]:
+                    testcase_files[testcase_name].append(relative_parent + "/HelperClass")
+                # add helper files 
+                if "Servlet_" in java_file._str and os.path.exists( java_file._str.replace("Servlet_", "Thread_")):
+                    testcase_files[testcase_name].append(relative_path.replace("Servlet_", "Thread_"))
+                
                 testcase_files[testcase_name].append(relative_path)
+        
+        # Add helper classes to testcases that reference them
+        # self._add_helper_classes(testcase_files, testcases_dir)
         
         # Create TestCase objects
         cwe_group = CWEGroup(cwe_id=cwe_id)
@@ -142,7 +162,7 @@ class JulietTestSuiteAnalyzer:
         base_filename = filename[:-5]  # Remove .java extension
         
         # Check for special suffixes that indicate file variants within a testcase
-        special_suffixes = ['_bad', '_good1', '_good2', '_good3', '_goodG2B', '_goodB2G', '_base']
+        special_suffixes = ['_bad', '_good1', '_good2', '_good3', '_goodG2B', '_goodB2G', '_base', '_Helper']
         
         # Also check for patterns like _goodG2B1, _goodG2B2, etc.
         import re
@@ -225,10 +245,105 @@ class JulietTestSuiteAnalyzer:
         
         return False
     
-    def print_summary(self):
+    def _add_helper_classes(self, testcase_files: Dict[str, List[str]], testcases_dir: Path):
         """
-        Print a summary of all discovered testcases.
+        Add helper classes to testcases that reference them.
+        
+        Helper classes follow the pattern: {testcase_base_name}_Helper.java
+        and are referenced in the main testcase files.
         """
+        # Create a mapping of testcase names to their helper class files
+        helper_files = set()
+        
+        # Find all helper class files recursively, specifically in any HelperClass/ subdirectories
+        for helper_dir in testcases_dir.rglob("HelperClass"):
+            for java_file in helper_dir.rglob("*_Helper.java"):
+                relative_path = str(java_file.relative_to(self.juliet_path))
+                helper_files.add(relative_path)
+        for java_file in testcases_dir.rglob("*_Helper.java"):
+            relative_path = str(java_file.relative_to(self.juliet_path))
+            helper_files.add(relative_path)
+        
+        # For each testcase, check if it references a helper class
+        for testcase_name, files in testcase_files.items():
+            for f in files:
+                parent = Path(f).parent
+                
+                if os.path.exists( parent / "Main.java") and "Main.java" not in files:
+                    files.add("Main.java")
+                if os.path.exists( parent / "ServletMain.java") and "ServletMain.java" not in files:
+                    files.add("ServletMain.java")
+            for helper_path in helper_files:
+                files.append(helper_path)
+            
+    
+    def _find_referenced_helpers(self, java_file: Path, testcases_dir: Path) -> List[str]:
+        """
+        Find helper classes referenced in a Java file by scanning for class instantiation patterns.
+        
+        Looks for patterns like: new CWE586_Explicit_Call_to_Finalize__basic_Helper()
+        """
+        try:
+            with open(java_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except (IOError, UnicodeDecodeError):
+            return []
+        
+        # Pattern to match helper class instantiation
+        # Matches: new CWE586_Explicit_Call_to_Finalize__basic_Helper()
+        helper_pattern = re.compile(r'new\s+([A-Za-z_][A-Za-z0-9_]*_Helper)\s*\(')
+        
+        referenced_helpers = []
+        for match in helper_pattern.finditer(content):
+            helper_class_name = match.group(1)
+            helper_file_name = f"{helper_class_name}.java"
+            
+            # Look for the helper file in the same directory as the current file
+            helper_file = java_file.parent / helper_file_name
+            if helper_file.exists():
+                relative_path = str(helper_file.relative_to(self.juliet_path))
+                referenced_helpers.append(relative_path)
+        
+        return referenced_helpers
+    
+    def print_summary(self, testcase_name: Optional[str] = None):
+        """
+        Print a summary of all discovered testcases, or a specific testcase if specified.
+        """
+        if testcase_name:
+            # Find the specific testcase
+            found_testcase = None
+            found_cwe = None
+            
+            for cwe_id, group in self.cwe_groups.items():
+                for testcase in group.testcases:
+                    if testcase.name == testcase_name:
+                        found_testcase = testcase
+                        found_cwe = cwe_id
+                        break
+                if found_testcase:
+                    break
+            
+            if not found_testcase:
+                print(f"Error: Testcase '{testcase_name}' not found.")
+                print("Available testcases:")
+                for cwe_id, group in self.cwe_groups.items():
+                    for testcase in group.testcases:
+                        print(f"  - {testcase.name}")
+                return
+            
+            # Print detailed info for the specific testcase
+            print(f"=== Testcase Analysis: {testcase_name} ===")
+            print(f"CWE: {found_cwe}")
+            print(f"Type: {found_testcase.testcase_type}")
+            print(f"Bad-only: {'Yes' if found_testcase.is_bad_only else 'No'}")
+            print(f"Servlet-based: {'Yes' if found_testcase.has_servlet else 'No'}")
+            print(f"Files ({len(found_testcase.files)}):")
+            for file_path in found_testcase.files:
+                print(f"  - {file_path}")
+            return
+        
+        # Original summary for all testcases
         total_cwes = len(self.cwe_groups)
         total_testcases = sum(len(group.testcases) for group in self.cwe_groups.values())
         total_files = sum(group.total_files for group in self.cwe_groups.values())
@@ -279,6 +394,7 @@ def main():
 Examples:
   python extract_juliet_testcases.py /path/to/juliet-java-test-suite
   python extract_juliet_testcases.py ../juliet-java-test-suite
+  python extract_juliet_testcases.py /path/to/juliet-java-test-suite --testcase CWE15_External_Control_of_System_or_Configuration_Setting__connect_tcp_01
         """
     )
     
@@ -287,12 +403,17 @@ Examples:
         help='Path to the Juliet Test Suite directory'
     )
     
+    parser.add_argument(
+        '--testcase',
+        help='Specify a single testcase name to analyze (e.g., CWE15_External_Control_of_System_or_Configuration_Setting__connect_tcp_01)'
+    )
+    
     args = parser.parse_args()
     
     try:
         analyzer = JulietTestSuiteAnalyzer(args.juliet_path)
         cwe_groups = analyzer.analyze()
-        analyzer.print_summary()
+        analyzer.print_summary(args.testcase)
         
     except FileNotFoundError as e:
         print(f"Error: {e}")
@@ -305,4 +426,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()
