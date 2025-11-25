@@ -171,6 +171,9 @@ class CodeQLQueryRunner:
             # Create temporary output file
             output_file = db_path.parent / f"{project_name}_results.{output_format}"
             
+            # Get CodeQL executable parent directory for search path
+            codeql_parent_dir = Path(self.codeql_path).parent
+            
             # Build CodeQL command
             cmd = [
                 self.codeql_path, "database", "analyze",
@@ -179,7 +182,7 @@ class CodeQLQueryRunner:
                 f"--format={output_format}",
                 f"--output={output_file}",
                 "--no-sarif-add-snippets",  # Reduce output size
-                "--search-path=/opt/codeql"  # Add CodeQL library search path
+                f"--search-path={codeql_parent_dir}"  # Add CodeQL library search path relative to executable
             ]
             print(f"Running command: {' '.join(cmd)}")
             
@@ -342,7 +345,7 @@ class CodeQLQueryRunner:
         is_single_file = query_path.exists() and query_path.is_file() and query_file.endswith('.ql')
         
         if not is_query_pack and not query_path.exists():
-            raise FileNotFoundError(f"Query file or directory does not exist: {query_file}")
+            print(f"Query file or directory does not exist: {query_file}")
         
         if is_query_pack:
             query_type = "query pack"
@@ -464,6 +467,121 @@ class CodeQLQueryRunner:
         
         print(f"Results saved to {output_path}")
     
+    def save_detailed_csv(self, output_file: str):
+        """Save detailed CSV with testcase_name, testcase_CWE, result1, result2 columns.
+        
+        This method extracts analysis names from SARIF results without code locations.
+        """
+        output_path = Path(output_file)
+        
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            fieldnames = ['testcase_name', 'testcase_CWE', 'result1', 'result2']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for result in self.results:
+                if not result.success or not result.results:
+                    # Write row with empty results for failed queries
+                    writer.writerow({
+                        'testcase_name': result.project_name,
+                        'testcase_CWE': result.cwe_id or '',
+                        'result1': '',
+                        'result2': ''
+                    })
+                    continue
+                
+                # Extract analysis names from results
+                analysis_names = self._extract_analysis_names(result.results)
+                
+                # Pad with empty strings if we have fewer than 2 results
+                result1 = analysis_names[0] if len(analysis_names) > 0 else ''
+                result2 = analysis_names[1] if len(analysis_names) > 1 else ''
+                
+                writer.writerow({
+                    'testcase_name': result.project_name,
+                    'testcase_CWE': result.cwe_id or '',
+                    'result1': result1,
+                    'result2': result2
+                })
+        
+        print(f"Detailed CSV results saved to {output_path}")
+    
+    def _extract_analysis_names(self, results: List[Dict[str, Any]]) -> List[str]:
+        """Extract analysis names from SARIF results, excluding code locations."""
+        analysis_names = set()
+        
+        for result in results:
+            if isinstance(result, dict):
+                if 'ruleId' in result:
+                    rule_id = result.get('ruleId')
+                    if rule_id:
+                        analysis_names.add(rule_id)
+                elif 'message' in result and 'locations' in result:
+                    # SARIF format - extract message text
+                    message = result.get('message', {})
+                    if isinstance(message, dict):
+                        text = message.get('text', '')
+                    else:
+                        text = str(message)
+                    
+                    if text and text.strip():
+                        # Clean up the text to remove code location references
+                        clean_text = self._clean_analysis_text(text)
+                        if clean_text:
+                            analysis_names.add(clean_text)
+                
+                elif 'result' in result:
+                    # Simple format with result field
+                    clean_text = self._clean_analysis_text(str(result['result']))
+                    if clean_text:
+                        analysis_names.add(clean_text)
+                
+                else:
+                    # Generic dict format - extract meaningful values
+                    for k, v in result.items():
+                        if k not in ['line_number', 'locations', 'physicalLocation', 'artifactLocation']:
+                            clean_text = self._clean_analysis_text(str(v))
+                            if clean_text:
+                                analysis_names.add(clean_text)
+            else:
+                # String or other format
+                clean_text = self._clean_analysis_text(str(result))
+                if clean_text:
+                    analysis_names.add(clean_text)
+        
+        return list(analysis_names)
+    
+    def _clean_analysis_text(self, text: str) -> str:
+        """Clean analysis text to remove code location references and extract meaningful content."""
+        if not text or not text.strip():
+            return ''
+        
+        # Remove common file path patterns
+        text = re.sub(r'[A-Za-z]:\\[^:]*', '', text)  # Windows paths
+        text = re.sub(r'/[^:]*\.java', '', text)  # Java file paths
+        text = re.sub(r'/[^:]*\.c', '', text)  # C file paths
+        text = re.sub(r'/[^:]*\.cpp', '', text)  # C++ file paths
+        text = re.sub(r'/[^:]*\.h', '', text)  # Header file paths
+        
+        # Remove line number references
+        text = re.sub(r':\d+', '', text)  # Remove :line_number
+        text = re.sub(r'line \d+', '', text)  # Remove "line X"
+        text = re.sub(r'at line \d+', '', text)  # Remove "at line X"
+        
+        # Remove common location patterns
+        text = re.sub(r'\([^)]*\.java\)', '', text)  # Remove (file.java)
+        text = re.sub(r'\([^)]*\.c\)', '', text)  # Remove (file.c)
+        text = re.sub(r'\([^)]*\.cpp\)', '', text)  # Remove (file.cpp)
+        
+        # Clean up extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Remove empty or very short results
+        if len(text) < 3:
+            return ''
+        
+        return text
+    
     def print_summary(self, query_file: str):
         """Print a summary of the results to console."""
         if not self.results:
@@ -540,13 +658,15 @@ class CodeQLQueryRunner:
         
 
         try:
+            # Get CodeQL executable parent directory for search path
+            codeql_parent_dir = Path(self.codeql_path).parent
             
             # Run CodeQL query compile with --check-only flag
             cmd = [
                 self.codeql_path, "query", "compile", 
                 "--check-only",
                 "--threads=1",  # Use single thread for validation
-                "--search-path=/opt/codeql",  # Add CodeQL library search path
+                f"--search-path={codeql_parent_dir}",  # Add CodeQL library search path relative to executable
                 str(query_path)
             ]
             
@@ -643,8 +763,11 @@ class CodeQLQueryRunner:
 
 
 def main():
-    import dotenv
-    dotenv.load_dotenv()
+    try:
+        import dotenv
+        dotenv.load_dotenv()
+    except ImportError:
+        pass  # dotenv is optional
     parser = argparse.ArgumentParser(
         description="Run CodeQL queries on Juliet testcase databases",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -664,6 +787,7 @@ Examples:
   python run_codeql_query.py --query security.ql --db-root ./codeql_dbs --variant bad --limit 10 --show-results --result-limit 5
   python run_codeql_query.py --query ./queries/ --db-root ./codeql_dbs --projects "CWE15_test_bad,CWE15_test_good" --show-results
   python run_codeql_query.py --query security.ql --db-root ./codeql_dbs --pattern "connect_tcp" --output results.json --show-results
+  python run_codeql_query.py --query security.ql --db-root ./codeql_dbs --detailed-csv analysis_results.csv
         """
     )
     
@@ -732,6 +856,11 @@ Examples:
     parser.add_argument(
         '--output', '-o',
         help='Output file for results (format determined by extension: .json, .csv)'
+    )
+    
+    parser.add_argument(
+        '--detailed-csv',
+        help='Output detailed CSV with testcase_name, testcase_CWE, result1, result2 columns'
     )
     
     parser.add_argument(
@@ -847,6 +976,10 @@ Examples:
                 output_format = 'csv'
             
             runner.save_results(args.output, output_format)
+        
+        # Save detailed CSV if requested
+        if args.detailed_csv:
+            runner.save_detailed_csv(args.detailed_csv)
         
         return 0
         
