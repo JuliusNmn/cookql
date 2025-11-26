@@ -12,6 +12,8 @@ Because the Juliet dataset bundles good and bad testcases in single classes, pre
 
 `results_smart.csv` is the result of `build_cwe_matrix.py` for a representative subset of Juliet. 
 
+sample CodeQL queries are in `sample_queries` and `sqli_initial`.
+
 ## Agent
 `agent.py` contains a prototype for an agent to iteratively refine CodeQL queries. This doesn't work yet, as the stock queries are too complex for current LLMs to understand.
 `memory_file_tools.py` contains langgraph tools that allow the agent to edit virtual files.
